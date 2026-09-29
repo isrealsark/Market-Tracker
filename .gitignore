@@ -1,0 +1,7 @@
+/.vscode/
+/build/
+**/node_modules/
+**/.dart_tool/
+**/coverage/
+**/.env
+/backend/.env.example
