@@ -58,7 +58,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
   }
 
   Future<_DailyReport> _loadReport() async {
-    if (!AppSession.isWorker && await db.isSubscriptionLocked()) {
+    if (await db.isSubscriptionLocked()) {
       if (mounted) {
         await SubscriptionRules.redirectIfLocked(
           context: context,
@@ -91,14 +91,12 @@ class _ReportsScreenState extends State<ReportsScreen> {
           .toList(),
       debts: allDebts.where((debt) => _isToday(debt['date'])).toList(),
       products: products,
-      orderCount: AppSession.isWorker ? 0 : todaysPayments.length,
-      customerCount: AppSession.isWorker ? 0 : customers.length,
-      cashTotal: AppSession.isWorker
-          ? 0
-          : _paymentTotal(todaysPayments, 'cash'),
-      momoTotal: AppSession.isWorker
-          ? 0
-          : _paymentTotal(todaysPayments, 'mobile_money'),
+      orderCount: todaysPayments.length,
+      customerCount: customers
+          .where((customer) => _isToday(customer['createdAt']))
+          .length,
+      cashTotal: _paymentTotal(todaysPayments, 'cash'),
+      momoTotal: _paymentTotal(todaysPayments, 'mobile_money'),
     );
   }
 

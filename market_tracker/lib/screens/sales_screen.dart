@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
+import 'app_notification.dart';
 import 'database_helper.dart';
 import 'subscription_screen.dart';
 import 'subscription_rules.dart';
-import 'app_session.dart';
 
 class SalesScreen extends StatefulWidget {
   const SalesScreen({super.key});
@@ -26,7 +26,7 @@ class _SalesScreenState extends State<SalesScreen> {
   }
 
   Future<void> _initScreen() async {
-    if (!AppSession.isWorker && await db.isSubscriptionLocked()) {
+    if (await db.isSubscriptionLocked()) {
       if (!mounted) return;
       await SubscriptionRules.redirectIfLocked(
         context: context,
@@ -93,9 +93,7 @@ class _SalesScreenState extends State<SalesScreen> {
               if (isValid) {
                 Navigator.pop(context, true);
               } else {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(const SnackBar(content: Text("Incorrect PIN")));
+                AppNotification.show(context, 'Incorrect PIN');
               }
             },
             child: const Text("Confirm"),
@@ -109,17 +107,13 @@ class _SalesScreenState extends State<SalesScreen> {
 
   Future<void> _saveSale() async {
     if (selectedProduct == null || qtyController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Select product and enter quantity")),
-      );
+      AppNotification.show(context, 'Select product and enter quantity');
       return;
     }
 
     final qty = int.tryParse(qtyController.text) ?? 0;
     if (qty <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Quantity must be greater than zero")),
-      );
+      AppNotification.show(context, 'Quantity must be greater than zero');
       return;
     }
 
@@ -129,9 +123,7 @@ class _SalesScreenState extends State<SalesScreen> {
       final message = stock == null || stock <= 0
           ? "${selectedProduct!} is out of stock. Order cannot be placed."
           : "Only $stock ${selectedProduct!} left in stock. Reduce the quantity.";
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
+      AppNotification.show(context, message);
       return;
     }
 
@@ -152,8 +144,9 @@ class _SalesScreenState extends State<SalesScreen> {
       salesFuture = db.getSales();
     });
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("Sale recorded: ₵${total.toStringAsFixed(2)}")),
+    AppNotification.show(
+      context,
+      'Sale recorded: ₵${total.toStringAsFixed(2)}',
     );
 
     qtyController.clear();

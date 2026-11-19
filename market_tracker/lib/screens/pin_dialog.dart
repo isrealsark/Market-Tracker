@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'app_notification.dart';
 import 'database_helper.dart';
 
 Future<bool> requirePin(BuildContext context, DatabaseHelper db) async {
@@ -26,9 +27,7 @@ Future<bool> requirePin(BuildContext context, DatabaseHelper db) async {
             if (isValid) {
               Navigator.pop(context, true);
             } else {
-              ScaffoldMessenger.of(
-                context,
-              ).showSnackBar(const SnackBar(content: Text("Incorrect PIN")));
+              AppNotification.show(context, 'Incorrect PIN');
             }
           },
           child: const Text("Confirm"),

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'app_notification.dart';
 import 'database_helper.dart';
 import 'company_detail_screen.dart';
 import 'login_screen.dart'; // 🔹 Import your login screen
+import 'app_session.dart';
 
 class AdminPanelScreen extends StatefulWidget {
   const AdminPanelScreen({super.key});
@@ -24,11 +26,23 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
   }
 
   Future<void> _loadCompanies() async {
-    final c = await db.getUsers();
-    setState(() {
-      customers = c;
-      filteredCustomers = c;
-    });
+    try {
+      final c = await db.getUsers();
+      if (!mounted) return;
+      setState(() {
+        customers = c;
+        filteredCustomers = c;
+      });
+    } catch (error) {
+      AppSession.clear();
+      if (!mounted) return;
+      AppNotification.show(context, 'Could not load companies: $error');
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
+        (route) => false,
+      );
+    }
   }
 
   Future<void> _debugShowUsers() async {
@@ -65,9 +79,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         ),
       );
     } catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('DB error: $e')));
+      AppNotification.show(context, 'DB error: $e');
     }
   }
 
@@ -81,8 +93,9 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     });
   }
 
-  void _logout() {
-    // 🔹 Optional: clear any session data here
+  Future<void> _logout() async {
+    AppSession.clear();
+    if (!mounted) return;
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(builder: (_) => const LoginScreen()),

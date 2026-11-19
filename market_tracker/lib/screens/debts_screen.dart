@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'app_notification.dart';
 import 'database_helper.dart';
 
 class DebtsScreen extends StatefulWidget {
@@ -76,9 +77,7 @@ class _DebtsScreenState extends State<DebtsScreen> {
               if (isValid) {
                 Navigator.pop(context, true);
               } else {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(const SnackBar(content: Text("Incorrect PIN")));
+                AppNotification.show(context, 'Incorrect PIN');
               }
             },
             child: const Text("Confirm"),
@@ -92,17 +91,13 @@ class _DebtsScreenState extends State<DebtsScreen> {
 
   Future<void> _saveDebt() async {
     if (creditorController.text.isEmpty || amountController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Enter creditor name and amount")),
-      );
+      AppNotification.show(context, 'Enter creditor name and amount');
       return;
     }
 
     final amount = double.tryParse(amountController.text) ?? 0.0;
     if (amount <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Amount must be greater than zero")),
-      );
+      AppNotification.show(context, 'Amount must be greater than zero');
       return;
     }
 
@@ -117,8 +112,9 @@ class _DebtsScreenState extends State<DebtsScreen> {
 
     await db.insertDebtIfNotExists(debt);
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("Debt recorded: ₵${amount.toStringAsFixed(2)}")),
+    AppNotification.show(
+      context,
+      'Debt recorded: ₵${amount.toStringAsFixed(2)}',
     );
 
     creditorController.clear();

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'app_notification.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -86,9 +87,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
   void _addToCart(Map<String, dynamic> product, int qty) async {
     if (qty <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Quantity must be greater than zero')),
-      );
+      AppNotification.show(context, 'Quantity must be greater than zero');
       return;
     }
 
@@ -98,9 +97,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
       final message = stock == null || stock <= 0
           ? '${product['name']} is out of stock. Order cannot be placed.'
           : 'Only $stock ${product['name']} left in stock. Reduce the quantity.';
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
+      AppNotification.show(context, message);
       return;
     }
 
@@ -129,16 +126,12 @@ class _PaymentScreenState extends State<PaymentScreen> {
     final now = DateTime.now().toIso8601String();
 
     if (cart.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Add at least one product to the cart')),
-      );
+      AppNotification.show(context, 'Add at least one product to the cart');
       return;
     }
 
     if (paymentMethod == 'cash' && cashReceived < finalTotal) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Cash received is less than the total')),
-      );
+      AppNotification.show(context, 'Cash received is less than the total');
       return;
     }
 
@@ -152,9 +145,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
         final message = stock == null || stock <= 0
             ? '$productName is out of stock. Order cannot be placed.'
             : 'Only $stock $productName left in stock. Reduce the quantity.';
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(message)));
+        AppNotification.show(context, message);
         return;
       }
     }
@@ -163,9 +154,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
     final name = nameController.text.trim();
     final phone = phoneController.text.trim();
     if (name.isEmpty || phone.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter customer name and phone')),
-      );
+      AppNotification.show(context, 'Please enter customer name and phone');
       return;
     }
 
@@ -288,7 +277,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
                                     ),
                                     const SizedBox(height: 4),
                                     Text(
-                                      'SALES RECEIPT',
+                                      'RECEIPT',
                                       style: TextStyle(
                                         color: Colors.orange.shade800,
                                         fontWeight: FontWeight.bold,
@@ -620,9 +609,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
       await Printing.layoutPdf(onLayout: (format) async => pdf.save());
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not open the print dialog.')),
-      );
+      AppNotification.show(context, 'Could not open the print dialog.');
     }
   }
 

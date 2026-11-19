@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'app_notification.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
@@ -54,11 +55,11 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         mode: LaunchMode.externalApplication,
       );
       if (!launched && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not open the payment page.'),
-            backgroundColor: Colors.red,
-          ),
+        AppNotification.show(context, 'Could not open the payment page.');
+      } else if (mounted) {
+        AppNotification.show(
+          context,
+          'On Paystack, enter your registered company name exactly. Sign in again after payment to refresh your subscription.',
         );
       }
       return;
@@ -94,11 +95,9 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       );
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Could not connect to the payment service.'),
-          backgroundColor: Colors.red,
-        ),
+      AppNotification.show(
+        context,
+        'Could not connect to the payment service.',
       );
     } finally {
       if (mounted) {

@@ -34,9 +34,13 @@ class _CompanyDetailScreenState extends State<CompanyDetailScreen> {
       final s = await db.getSalesByCompany(widget.companyId);
       final e = await db.getExpensesByCompany(widget.companyId);
       final d = await db.getDebtsByCompany(widget.companyId);
+      final recentCustomers = _withinLastTwoDays(c, 'createdAt');
+      final recentSales = _withinLastTwoDays(s, 'date');
+      final recentExpenses = _withinLastTwoDays(e, 'date');
+      final recentDebts = _withinLastTwoDays(d, 'date');
 
       final purchases = <int, List<String>>{};
-      for (final sale in s) {
+      for (final sale in recentSales) {
         final customerId = sale['customerId'];
         if (customerId == null) continue;
         final productName = (sale['product'] ?? 'Product').toString();
@@ -44,10 +48,10 @@ class _CompanyDetailScreenState extends State<CompanyDetailScreen> {
       }
 
       setState(() {
-        customers = c;
-        sales = s;
-        expenses = e;
-        debts = d;
+        customers = recentCustomers;
+        sales = recentSales;
+        expenses = recentExpenses;
+        debts = recentDebts;
       });
     } catch (err) {
       // If company-linked columns/tables are not present, fail gracefully.
@@ -60,13 +64,24 @@ class _CompanyDetailScreenState extends State<CompanyDetailScreen> {
     }
   }
 
+  List<Map<String, dynamic>> _withinLastTwoDays(
+    List<Map<String, dynamic>> records,
+    String dateField,
+  ) {
+    final cutoff = DateTime.now().subtract(const Duration(days: 2));
+    return records.where((record) {
+      final date = DateTime.tryParse(record[dateField]?.toString() ?? '');
+      return date != null && !date.isBefore(cutoff);
+    }).toList();
+  }
+
   Future<void> _deleteCustomer(int id) async {
     await db.adminDeleteCustomer(id);
     _loadCompanyData();
   }
 
   Future<void> _deleteSale(int id) async {
-    await db.adminDeleteSale(id);
+    await db.adminDeleteSale(id, companyId: widget.companyId);
     _loadCompanyData();
   }
 

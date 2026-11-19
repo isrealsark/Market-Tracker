@@ -1,20 +1,46 @@
+import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'screens/sync_service.dart';
+import 'screens/company_sync_service.dart';
+import 'screens/database_helper.dart';
 
 class ConnectivityService {
-  final SyncService _syncService = SyncService();
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+  Timer? _retryTimer;
+  bool _syncInProgress = false;
 
-  void listenForConnectivityChanges() {
-    Connectivity().onConnectivityChanged.listen((
-      List<ConnectivityResult> results,
-    ) async {
-      // Check if any of the results show online connectivity
-      if (results.contains(ConnectivityResult.mobile) ||
-          results.contains(ConnectivityResult.wifi)) {
-        // Device is online → trigger sync
-        await _syncService.mergeSalesFromCloud();
-        await _syncService.mergeExpensesFromCloud();
+  void start() {
+    _connectivitySubscription ??= Connectivity().onConnectivityChanged.listen((
+      results,
+    ) {
+      if (results.any((result) => result != ConnectivityResult.none)) {
+        syncPendingChanges();
       }
     });
+    _retryTimer ??= Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => syncPendingChanges(),
+    );
+    syncPendingChanges();
+  }
+
+  Future<void> syncPendingChanges() async {
+    if (_syncInProgress) return;
+    _syncInProgress = true;
+    try {
+      final connections = await Connectivity().checkConnectivity();
+      if (connections.every((result) => result == ConnectivityResult.none)) {
+        return;
+      }
+      await CompanySyncService.syncPendingChanges(DatabaseHelper.instance);
+    } catch (_) {
+      // Keep the dirty flag set and retry on the next connectivity event or timer.
+    } finally {
+      _syncInProgress = false;
+    }
+  }
+
+  Future<void> dispose() async {
+    _retryTimer?.cancel();
+    await _connectivitySubscription?.cancel();
   }
 }

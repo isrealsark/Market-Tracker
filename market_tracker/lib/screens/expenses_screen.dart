@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'app_notification.dart';
 import 'database_helper.dart';
 import 'package:intl/intl.dart';
 
@@ -24,9 +25,12 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
 
   Future<void> _loadExpenses() async {
     final result = await db.getExpenses();
+    if (!mounted) return;
     setState(() {
-      expenses = result;
-      filteredExpenses = expenses;
+      expenses = result
+          .map((expense) => Map<String, dynamic>.from(expense))
+          .toList();
+      filteredExpenses = List<Map<String, dynamic>>.of(expenses);
       _applySort();
     });
   }
@@ -34,11 +38,15 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
   void _applySort() {
     if (sortOption == 'date') {
       filteredExpenses.sort(
-        (a, b) => (b['date'] as String).compareTo(a['date'] as String),
+        (a, b) => (b['date'] ?? '').toString().compareTo(
+          (a['date'] ?? '').toString(),
+        ),
       );
     } else if (sortOption == 'amount') {
       filteredExpenses.sort(
-        (a, b) => (b['amount'] as num).compareTo(a['amount'] as num),
+        (a, b) => (num.tryParse((b['amount'] ?? '').toString()) ?? 0).compareTo(
+          num.tryParse((a['amount'] ?? '').toString()) ?? 0,
+        ),
       );
     }
   }
@@ -78,9 +86,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
               if (isValid) {
                 Navigator.pop(context, true);
               } else {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(const SnackBar(content: Text("Incorrect PIN")));
+                AppNotification.show(context, 'Incorrect PIN');
               }
             },
             child: const Text("Confirm"),
@@ -105,9 +111,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
       return true;
     } catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not add expense: $error')),
-        );
+        AppNotification.show(context, 'Could not add expense: $error');
       }
       return false;
     }
@@ -251,12 +255,9 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
                     final name = nameController.text.trim();
                     final amount = double.tryParse(amountController.text);
                     if (name.isEmpty || amount == null || amount <= 0) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'Enter an expense name and a valid amount',
-                          ),
-                        ),
+                      AppNotification.show(
+                        context,
+                        'Enter an expense name and a valid amount',
                       );
                       return;
                     }

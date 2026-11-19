@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'app_notification.dart';
 import 'database_helper.dart';
 import 'reports_screen.dart';
 
@@ -44,9 +45,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
               if (valid) {
                 Navigator.pop(dialogContext, true);
               } else {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(const SnackBar(content: Text('Incorrect PIN')));
+                AppNotification.show(context, 'Incorrect PIN');
               }
             },
             child: const Text('Confirm'),
@@ -79,10 +78,9 @@ class _InventoryScreenState extends State<InventoryScreen> {
             onPressed: () {
               final value = int.tryParse(quantityController.text);
               if (value == null || value <= 0) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Enter a quantity greater than zero'),
-                  ),
+                AppNotification.show(
+                  context,
+                  'Enter a quantity greater than zero',
                 );
                 return;
               }
@@ -104,12 +102,9 @@ class _InventoryScreenState extends State<InventoryScreen> {
     setState(() {
       productsFuture = db.getProducts();
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          changed ? 'Inventory updated' : 'Product could not be updated',
-        ),
-      ),
+    AppNotification.show(
+      context,
+      changed ? 'Inventory updated' : 'Product could not be updated',
     );
   }
 

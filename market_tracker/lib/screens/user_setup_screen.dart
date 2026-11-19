@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'app_notification.dart';
 import 'database_helper.dart';
 import 'login_screen.dart';
 import 'company_sync_service.dart';
@@ -94,7 +95,7 @@ class _UserSetupScreenState extends State<UserSetupScreen> {
   }
 
   void _showMessage(String text) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+    AppNotification.show(context, text);
   }
 
   @override

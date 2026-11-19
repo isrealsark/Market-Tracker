@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'app_notification.dart';
 import 'database_helper.dart';
 import 'user_setup_screen.dart';
 import 'package:intl/intl.dart';
@@ -65,9 +66,7 @@ class _ProductsScreenState extends State<ProductsScreen> {
         await _loadProducts();
         return true;
       } catch (e) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Failed to add product: $e')));
+        AppNotification.show(context, 'Failed to add product: $e');
         return false;
       }
     }
@@ -108,9 +107,7 @@ class _ProductsScreenState extends State<ProductsScreen> {
               if (isValid) {
                 Navigator.pop(context, true);
               } else {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(const SnackBar(content: Text("Incorrect PIN")));
+                AppNotification.show(context, 'Incorrect PIN');
               }
             },
             child: const Text("Confirm"),
@@ -198,9 +195,7 @@ class _ProductsScreenState extends State<ProductsScreen> {
                     final added = await _addProduct(name, price);
                     if (added) {
                       Navigator.pop(context);
-                      ScaffoldMessenger.of(this.context).showSnackBar(
-                        const SnackBar(content: Text('Product added')),
-                      );
+                      AppNotification.show(this.context, 'Product added');
                     }
                   },
                   child: const Text('Add'),

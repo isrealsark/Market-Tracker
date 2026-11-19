@@ -3,7 +3,6 @@ import 'database_helper.dart';
 import 'customer_profile_screen.dart';
 import 'subscription_screen.dart';
 import 'subscription_rules.dart';
-import 'app_session.dart';
 
 class CustomersScreen extends StatefulWidget {
   const CustomersScreen({super.key});
@@ -23,7 +22,7 @@ class _CustomersScreenState extends State<CustomersScreen> {
   }
 
   Future<void> _loadCustomers() async {
-    if (!AppSession.isWorker && await db.isSubscriptionLocked()) {
+    if (await db.isSubscriptionLocked()) {
       if (!mounted) return;
       await SubscriptionRules.redirectIfLocked(
         context: context,

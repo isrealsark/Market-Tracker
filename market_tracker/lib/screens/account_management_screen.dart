@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'app_notification.dart';
 import 'database_helper.dart';
 import 'login_screen.dart';
 import 'homescreen.dart';
 import 'app_session.dart';
+import 'company_sync_service.dart';
 
 class AccountManagementScreen extends StatefulWidget {
   const AccountManagementScreen({super.key});
@@ -55,9 +57,56 @@ class _AccountManagementScreenState extends State<AccountManagementScreen> {
     return verified == true;
   }
 
+  Future<void> _addWorker() async {
+    if (!await _verifyPin() || !mounted) return;
+    final workerController = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Add Worker'),
+        content: TextField(
+          controller: workerController,
+          decoration: const InputDecoration(labelText: 'Worker name'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () =>
+                Navigator.pop(dialogContext, workerController.text.trim()),
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+    workerController.dispose();
+
+    if (name == null || !mounted) return;
+    if (name.isEmpty) {
+      AppNotification.show(context, 'Enter a worker name');
+      return;
+    }
+
+    final result = await db.addWorker(name);
+    if (!mounted) return;
+    setState(() {
+      workersFuture = db.getWorkers();
+    });
+    final message = switch (result) {
+      WorkerSaveResult.added => 'Worker added successfully',
+      WorkerSaveResult.alreadyExists => 'Worker name already exists',
+      WorkerSaveResult.limitReached =>
+        'After the trial, you can save up to three workers. Subscribe to add more.',
+    };
+    AppNotification.show(context, message);
+  }
+
   Future<void> _openWorkerAccount(Map<String, dynamic> worker) async {
     final workerName = worker['name']?.toString() ?? '';
     if (workerName.isEmpty) return;
+    if (!await _verifyPin() || !mounted) return;
 
     AppSession.setWorker(AppSession.userId, workerName);
     if (!mounted) return;
@@ -96,9 +145,7 @@ class _AccountManagementScreenState extends State<AccountManagementScreen> {
     setState(() {
       workersFuture = db.getWorkers();
     });
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Worker deactivated')));
+    AppNotification.show(context, 'Worker deactivated');
   }
 
   Future<void> _deactivateAccount() async {
@@ -135,9 +182,7 @@ class _AccountManagementScreenState extends State<AccountManagementScreen> {
               if (valid) {
                 Navigator.pop(dialogContext, true);
               } else {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(const SnackBar(content: Text('Incorrect PIN')));
+                AppNotification.show(context, 'Incorrect PIN');
               }
             },
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
@@ -149,6 +194,7 @@ class _AccountManagementScreenState extends State<AccountManagementScreen> {
     pinController.dispose();
 
     if (confirmed != true || !mounted) return;
+    await CompanySyncService.signOut();
     await db.deactivateAccount();
     if (!mounted) return;
     Navigator.pushAndRemoveUntil(
@@ -165,7 +211,10 @@ class _AccountManagementScreenState extends State<AccountManagementScreen> {
         title: const Text('Workers'),
         actions: [
           TextButton(
-            onPressed: () {
+            onPressed: () async {
+              await CompanySyncService.signOut();
+              AppSession.clear();
+              if (!mounted) return;
               Navigator.pushReplacement(
                 context,
                 MaterialPageRoute(builder: (_) => const LoginScreen()),
@@ -193,6 +242,15 @@ class _AccountManagementScreenState extends State<AccountManagementScreen> {
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
+              Align(
+                alignment: Alignment.centerRight,
+                child: FilledButton.icon(
+                  onPressed: _addWorker,
+                  icon: const Icon(Icons.person_add),
+                  label: const Text('Add Worker'),
+                ),
+              ),
+              const SizedBox(height: 12),
               const Text(
                 'Saved worker names',
                 style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),

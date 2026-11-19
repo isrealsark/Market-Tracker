@@ -1,10 +1,10 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'database_helper.dart';
 import 'subscription_screen.dart';
 import 'subscription_rules.dart';
-import 'app_session.dart';
 
 class CustomerProfileScreen extends StatefulWidget {
   final int customerId;
@@ -29,7 +29,6 @@ class _CustomerProfileScreenState extends State<CustomerProfileScreen> {
   }
 
   Future<void> _ensureAccess() async {
-    if (AppSession.isWorker) return;
     final locked = await db.isSubscriptionLocked();
     if (!mounted) return;
     if (locked) {
@@ -43,15 +42,8 @@ class _CustomerProfileScreenState extends State<CustomerProfileScreen> {
 
   Future<void> _loadCustomer() async {
     await _ensureAccess();
-    final dbInstance = await db.database;
-    final result = await dbInstance.query(
-      'customers',
-      where: 'id = ?',
-      whereArgs: [widget.customerId],
-    );
-    if (result.isNotEmpty) {
-      setState(() => customer = result.first);
-    }
+    final result = await db.getCustomerById(widget.customerId);
+    if (result != null) setState(() => customer = result);
   }
 
   Future<void> _loadSales() async {
@@ -60,19 +52,22 @@ class _CustomerProfileScreenState extends State<CustomerProfileScreen> {
   }
 
   Future<void> _loadReceipts() async {
-    final dbInstance = await db.database;
-    final list = await dbInstance.query(
-      'receipts',
-      where: 'customerId = ?',
-      whereArgs: [widget.customerId],
-      orderBy: 'date DESC',
-    );
+    final list = await db.getReceiptsByCustomer(widget.customerId);
     setState(() => receipts = list);
+  }
+
+  Map<String, dynamic> _receiptDetails(Map<String, dynamic> receipt) {
+    try {
+      final details = jsonDecode(receipt['details']?.toString() ?? '');
+      return details is Map ? Map<String, dynamic>.from(details) : {};
+    } on FormatException {
+      return {};
+    }
   }
 
   Future<void> _printCustomerProfile() async {
     if (customer == null) return;
-    if (!AppSession.isWorker && await db.isSubscriptionLocked()) {
+    if (await db.isSubscriptionLocked()) {
       if (!mounted) return;
       await SubscriptionRules.redirectIfLocked(
         context: context,
@@ -242,10 +237,22 @@ class _CustomerProfileScreenState extends State<CustomerProfileScreen> {
                 itemCount: receipts.length,
                 itemBuilder: (_, i) {
                   final r = receipts[i];
+                  final details = _receiptDetails(r);
+                  final products = (details['products'] as List? ?? [])
+                      .map((item) => (item as Map)['product']?.toString() ?? '')
+                      .where((name) => name.isNotEmpty)
+                      .join(', ');
+                  final total = details['finalTotal'] ?? r['total'] ?? '';
                   return ListTile(
                     title: Text("Receipt #${r['id']}"),
-                    subtitle: Text(r['date']),
-                    trailing: Text("Total: GHS ${r['total'] ?? ''}"),
+                    subtitle: Text(
+                      [
+                        r['date']?.toString() ?? '',
+                        if (products.isNotEmpty) products,
+                      ].join('\n'),
+                    ),
+                    isThreeLine: products.isNotEmpty,
+                    trailing: Text("Total: GHS $total"),
                   );
                 },
               ),

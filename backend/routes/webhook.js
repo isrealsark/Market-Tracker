@@ -1,6 +1,9 @@
 const express = require("express");
 const crypto = require("crypto");
-const { markCompanyPaid } = require("../services/companyDatabase");
+const {
+  markCompanyPaid,
+  markCompanyPaidFromStaticLink,
+} = require("../services/companyDatabase");
 const router = express.Router();
 
 // The variable_name of the "Company name" field on your Paystack payment page.
@@ -53,13 +56,18 @@ router.post(
         const field = fields.find((f) => f.variable_name === COMPANY_FIELD);
         const companyName = (field?.value || "").trim().toLowerCase();
 
-        // 4. Mark that company as paid
+        // 4. Prefer a backend-created pending transaction reference.
+        // Static Paystack links fall back to the configured company field.
+        let updated = await markCompanyPaid(event.data);
         if (companyName) {
-          const updated = await markCompanyPaid(companyName, event.data);
           if (!updated) {
-            console.warn("Payment received but no company matched:", companyName);
+            updated = await markCompanyPaidFromStaticLink(
+              companyName,
+              event.data,
+            );
           }
-        } else {
+        }
+        if (!updated) {
           console.warn("Payment received with no company name:", event.data.reference);
         }
       }

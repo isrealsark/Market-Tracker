@@ -15,22 +15,42 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
+  static const _adminUsername = 'ISRAELSARK';
+  static const _adminCompany = 'ADMIN';
+  static const _adminPin = 'M4411d1971.';
+
   final db = DatabaseHelper.instance;
   final usernameController = TextEditingController();
   final companyController = TextEditingController();
   final pinController = TextEditingController();
   String? error;
+  bool _isSigningIn = false;
 
   Future<void> _login() async {
+    if (_isSigningIn) return;
+    setState(() {
+      _isSigningIn = true;
+      error = null;
+    });
+
+    try {
+      await _performLogin();
+    } finally {
+      if (mounted) {
+        setState(() => _isSigningIn = false);
+      }
+    }
+  }
+
+  Future<void> _performLogin() async {
     final username = usernameController.text.trim();
     final company = companyController.text.trim();
-    final pin = pinController.text.trim();
+    final pin = pinController.text;
 
-    // 🔑 Admin login check (requires PIN)
-    if (username == "ISRAELSARK" &&
-        company == "ADMIN" &&
-        pin == "M4411d1971.") {
-      AppSession.setOwner();
+    if (company.toUpperCase() == _adminCompany &&
+        username == _adminUsername &&
+        pin == _adminPin) {
+      AppSession.setAdmin(username);
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => const AdminPanelScreen()),
@@ -43,44 +63,114 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
-    // Normal login accepts either the account username or a worker name.
-    final isValid = await db.verifyUser(username, company);
-    if (isValid) {
-      final accountId = await db.getUserIdForLogin(username, company);
-      final isWorkerLogin = await db.isWorker(username, company);
-
-      AppSession.userId = accountId;
-      try {
-        final status = await CompanySyncService.getCompanyStatus(
-          companyName: company,
-        );
-        final expiryRaw = status?['expiresAt'];
-        await db.setSubscriptionStatus(
-          paid: status?['paid'] == true,
-          expiresAt: expiryRaw == null
-              ? null
-              : DateTime.tryParse(expiryRaw.toString()),
-        );
-      } catch (_) {
-        // Keep the previously stored status when the backend is unavailable.
+    final localAccountId = await db.getUserIdForLogin(username, company);
+    final localIsWorker =
+        localAccountId != null && await db.isWorker(username, company);
+    var localCredentialsValid = false;
+    if (localAccountId != null) {
+      AppSession.userId = localAccountId;
+      final localUserExists = await db.verifyUser(username, company);
+      if (!localUserExists) {
+        AppSession.clear();
+        setState(() => error = 'Invalid company credentials');
+        return;
       }
-
-      if (isWorkerLogin) {
-        AppSession.setWorker(accountId, username);
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const HomeScreen()),
-        );
-      } else {
-        AppSession.setOwner(accountId, username);
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const AccountManagementScreen()),
-        );
-      }
-    } else {
-      setState(() => error = "Invalid username or company");
+      localCredentialsValid = pin.isEmpty || await db.verifyPin(pin);
     }
+
+    Map<String, dynamic>? cloudSession;
+    try {
+      if (localAccountId != null && !localIsWorker) {
+        await CompanySyncService.registerCompany(
+          companyName: company,
+          username: username,
+        );
+      }
+      cloudSession = await CompanySyncService.signIn(
+        companyName: company,
+        username: username,
+        pin: pin,
+      );
+      final needsMigration = cloudSession['needsMigration'] == true;
+      if (needsMigration) {
+        if (cloudSession['role'] != 'owner' || localAccountId == null) {
+          await CompanySyncService.clearSession();
+          cloudSession = null;
+          throw Exception('The owner must migrate this company first.');
+        }
+        await CompanySyncService.uploadCurrentSnapshot(db);
+      } else {
+        final snapshot = await CompanySyncService.downloadSnapshot();
+        await db.importCompanySnapshot(
+          snapshot.data,
+          pin: pin.isEmpty ? null : pin,
+          cloudRevision: snapshot.revision,
+        );
+      }
+    } on InvalidCompanyCredentialsException {
+      if (!localCredentialsValid) {
+        AppSession.clear();
+        setState(() => error = 'Invalid company credentials');
+        return;
+      }
+      await CompanySyncService.clearSession();
+      cloudSession = null;
+    } catch (_) {
+      if (!localCredentialsValid) {
+        AppSession.clear();
+        setState(() => error = 'Could not connect to the company account');
+        return;
+      }
+    }
+
+    final accountId = cloudSession == null
+        ? localAccountId!
+        : (await db.getUserIdForLogin(username, company));
+    if (accountId == null) {
+      AppSession.clear();
+      setState(() => error = 'Company data could not be loaded');
+      return;
+    }
+
+    try {
+      final status = await CompanySyncService.getCompanyStatus(
+        companyName: company,
+      );
+      final expiryRaw = status?['expiresAt'];
+      await db.setSubscriptionStatus(
+        paid: status?['paid'] == true,
+        expiresAt: expiryRaw == null
+            ? null
+            : DateTime.tryParse(expiryRaw.toString()),
+      );
+    } catch (_) {
+      // Keep the locally cached subscription status while offline.
+    }
+
+    final isWorkerLogin = cloudSession == null
+        ? localIsWorker
+        : cloudSession['role'] == 'worker';
+    if (isWorkerLogin) {
+      AppSession.setWorker(accountId, username);
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const HomeScreen()),
+      );
+    } else {
+      AppSession.setOwner(accountId, username);
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const AccountManagementScreen()),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    usernameController.dispose();
+    companyController.dispose();
+    pinController.dispose();
+    super.dispose();
   }
 
   @override
@@ -162,7 +252,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           child: TextField(
                             controller: companyController,
                             decoration: const InputDecoration(
-                              labelText: "Company Name",
+                              labelText: "Company Name ",
                               border: InputBorder.none,
                               contentPadding: EdgeInsets.symmetric(
                                 horizontal: 12,
@@ -185,7 +275,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             controller: pinController,
                             obscureText: true,
                             decoration: const InputDecoration(
-                              labelText: "PIN (optional)",
+                              labelText: "PIN",
                               border: InputBorder.none,
                               contentPadding: EdgeInsets.symmetric(
                                 horizontal: 12,
@@ -204,8 +294,14 @@ class _LoginScreenState extends State<LoginScreen> {
                   child: SizedBox(
                     width: double.infinity,
                     child: ElevatedButton(
-                      onPressed: _login,
-                      child: const Text("Unlock"),
+                      onPressed: _isSigningIn ? null : _login,
+                      child: _isSigningIn
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text("Unlock"),
                     ),
                   ),
                 ),
@@ -221,7 +317,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   },
                   icon: const Icon(Icons.arrow_back, color: Colors.white),
                   label: const Text(
-                    "Back to setup",
+                    "Create a new account",
                     style: TextStyle(color: Colors.white),
                   ),
                 ),

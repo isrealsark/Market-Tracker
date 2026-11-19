@@ -1,10 +1,20 @@
+import 'dart:math';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
+import 'package:cryptography/cryptography.dart';
 import 'app_session.dart';
 
+enum WorkerSaveResult { added, alreadyExists, limitReached }
+
 class DatabaseHelper {
+  static final Argon2id _pinKdf = Argon2id(
+    parallelism: 1,
+    memory: 19456,
+    iterations: 2,
+    hashLength: 32,
+  );
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
 
@@ -16,14 +26,131 @@ class DatabaseHelper {
     return _database!;
   }
 
+  static const List<String> _cloudSyncTables = [
+    'users',
+    'workers',
+    'customers',
+    'products',
+    'sales',
+    'payments',
+    'expenses',
+    'debts',
+    'receipts',
+  ];
+  static const List<String> _workerActivityTables = [
+    'customers',
+    'sales',
+    'payments',
+    'expenses',
+    'debts',
+    'receipts',
+  ];
+
+  Future<void> _initializeCloudSyncState(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS local_pin_security_state (
+        userId INTEGER PRIMARY KEY,
+        failedAttempts INTEGER NOT NULL DEFAULT 0,
+        lockoutUntil TEXT
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS cloud_sync_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        dirty INTEGER NOT NULL DEFAULT 0,
+        revision INTEGER NOT NULL DEFAULT 0,
+        cloud_revision INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+    final stateColumns = await db.rawQuery(
+      'PRAGMA table_info(cloud_sync_state)',
+    );
+    if (!stateColumns.any((column) => column['name'] == 'revision')) {
+      await db.execute(
+        'ALTER TABLE cloud_sync_state ADD COLUMN revision INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+    if (!stateColumns.any((column) => column['name'] == 'cloud_revision')) {
+      await db.execute(
+        'ALTER TABLE cloud_sync_state ADD COLUMN cloud_revision INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+    await db.insert('cloud_sync_state', {
+      'id': 1,
+      'dirty': 0,
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+
+    for (final table in _cloudSyncTables) {
+      for (final action in ['INSERT', 'UPDATE', 'DELETE']) {
+        final event = action.toLowerCase();
+        await db.execute('''
+          CREATE TRIGGER IF NOT EXISTS cloud_sync_${table}_$event
+          AFTER $action ON $table
+          BEGIN
+            UPDATE cloud_sync_state
+            SET dirty = 1, revision = revision + 1
+            WHERE id = 1;
+          END
+        ''');
+      }
+    }
+  }
+
+  Future<bool> hasPendingCloudChanges() async {
+    final db = await database;
+    final result = await db.query(
+      'cloud_sync_state',
+      columns: ['dirty'],
+      where: 'id = 1',
+      limit: 1,
+    );
+    return result.isNotEmpty && result.first['dirty'] == 1;
+  }
+
+  Future<int> getCloudSyncRevision() async {
+    final db = await database;
+    final result = await db.query(
+      'cloud_sync_state',
+      columns: ['revision'],
+      where: 'id = 1',
+      limit: 1,
+    );
+    return (result.first['revision'] as num?)?.toInt() ?? 0;
+  }
+
+  Future<int> getCloudServerRevision() async {
+    final db = await database;
+    final result = await db.query(
+      'cloud_sync_state',
+      columns: ['cloud_revision'],
+      where: 'id = 1',
+      limit: 1,
+    );
+    return (result.first['cloud_revision'] as num?)?.toInt() ?? 0;
+  }
+
+  Future<void> markCloudChangesSyncedAtRevision(
+    int revision,
+    int cloudRevision,
+  ) async {
+    final db = await database;
+    await db.update(
+      'cloud_sync_state',
+      {'dirty': 0, 'cloud_revision': cloudRevision},
+      where: 'id = 1 AND revision = ?',
+      whereArgs: [revision],
+    );
+  }
+
   Future<Database> _initDB(String filePath) async {
     final dbPath = await getDatabasesPath();
     final path = join(dbPath, filePath);
     return await openDatabase(
       path,
-      version: 6,
+      version: 7,
       onCreate: _createDB,
       onUpgrade: _upgradeDB,
+      onOpen: _initializeCloudSyncState,
     );
   }
 
@@ -55,6 +182,7 @@ class DatabaseHelper {
       CREATE TABLE customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         userId INTEGER,
+        workerName TEXT,
         name TEXT,
         phone TEXT,
         cardNumber TEXT,
@@ -79,6 +207,7 @@ class DatabaseHelper {
       CREATE TABLE sales (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         userId INTEGER,
+        workerName TEXT,
         customerId INTEGER,
         product TEXT,
         quantity INTEGER,
@@ -92,6 +221,7 @@ class DatabaseHelper {
       CREATE TABLE payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         userId INTEGER,
+        workerName TEXT,
         customerId INTEGER,
         saleId INTEGER,
         method TEXT,
@@ -107,6 +237,7 @@ class DatabaseHelper {
       CREATE TABLE expenses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         userId INTEGER,
+        workerName TEXT,
         name TEXT,
         amount REAL,
         date TEXT
@@ -118,6 +249,7 @@ class DatabaseHelper {
       CREATE TABLE debts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         userId INTEGER,
+        workerName TEXT,
         creditor TEXT,
         amount REAL,
         date TEXT
@@ -129,6 +261,7 @@ class DatabaseHelper {
       CREATE TABLE receipts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         userId INTEGER,
+        workerName TEXT,
         customerId INTEGER,
         details TEXT,
         date TEXT
@@ -177,18 +310,35 @@ class DatabaseHelper {
         'ALTER TABLE users ADD COLUMN subscriptionExpiresAt TEXT',
       );
     }
+    if (oldVersion < 7) {
+      for (final table in _workerActivityTables) {
+        await db.execute('ALTER TABLE $table ADD COLUMN workerName TEXT');
+      }
+    }
   }
 
   int get _userId => AppSession.userId ?? 0;
 
-  Map<String, dynamic> _scoped(Map<String, dynamic> values) => {
+  Map<String, dynamic> _scoped(
+    Map<String, dynamic> values, {
+    bool trackWorker = true,
+  }) => {
     ...values,
     'userId': _userId,
+    if (trackWorker)
+      'workerName': AppSession.isWorker ? AppSession.currentName : null,
   };
 
   String get _scopeWhere => 'userId = ?';
 
   List<int> get _scopeArgs => [_userId];
+
+  String get _activityWhere => AppSession.isWorker
+      ? 'userId = ? AND lower(workerName) = lower(?)'
+      : _scopeWhere;
+
+  List<Object?> get _activityArgs =>
+      AppSession.isWorker ? [_userId, AppSession.currentName] : _scopeArgs;
 
   DateTime workerDashboardStart() {
     final now = DateTime.now();
@@ -199,16 +349,52 @@ class DatabaseHelper {
   }
 
   // ---------- PIN ----------
-  String hashPin(String pin) {
-    return sha256.convert(utf8.encode(pin)).toString();
+  Future<String> hashPin(String pin) async {
+    final salt = List<int>.generate(16, (_) => Random.secure().nextInt(256));
+    final key = await _pinKdf.deriveKeyFromPassword(password: pin, nonce: salt);
+    final digest = await key.extractBytes();
+    return 'argon2id-v1\$${base64Url.encode(salt)}\$${base64Url.encode(digest)}';
+  }
+
+  Future<bool> _matchesPin(String pin, String storedHash) async {
+    final parts = storedHash.split(r'$');
+    if (parts.length == 3 && parts.first == 'argon2id-v1') {
+      try {
+        final salt = base64Url.decode(parts[1]);
+        final expected = base64Url.decode(parts[2]);
+        final key = await _pinKdf.deriveKeyFromPassword(
+          password: pin,
+          nonce: salt,
+        );
+        return _constantTimeEquals(await key.extractBytes(), expected);
+      } on FormatException {
+        return false;
+      }
+    }
+
+    final legacyHash = sha256.convert(utf8.encode(pin)).toString();
+    return _constantTimeEquals(
+      utf8.encode(legacyHash),
+      utf8.encode(storedHash),
+    );
+  }
+
+  bool _constantTimeEquals(List<int> actual, List<int> expected) {
+    if (actual.length != expected.length) return false;
+    var difference = 0;
+    for (var index = 0; index < actual.length; index++) {
+      difference |= actual[index] ^ expected[index];
+    }
+    return difference == 0;
   }
 
   Future<int> saveUser(String username, String company, String pin) async {
     final db = await database;
+    final pinHash = await hashPin(pin);
     return await db.insert('users', {
       'username': username,
       'company': company,
-      'pinHash': hashPin(pin),
+      'pinHash': pinHash,
     });
   }
 
@@ -219,18 +405,32 @@ class DatabaseHelper {
     }
   }
 
-  Future<bool> addWorker(String name) async {
+  Future<WorkerSaveResult> addWorker(String name) async {
     final db = await database;
     final userId = _userId;
-    if (userId == 0) return false;
-    final existing = await db.query(
-      'workers',
-      where: 'userId = ? AND lower(name) = lower(?)',
-      whereArgs: [userId, name],
-    );
-    if (existing.isNotEmpty) return false;
-    await db.insert('workers', {'userId': userId, 'name': name});
-    return true;
+    if (userId == 0) return WorkerSaveResult.alreadyExists;
+    final subscriptionLocked = await isSubscriptionLocked();
+
+    return db.transaction((txn) async {
+      final existing = await txn.query(
+        'workers',
+        where: 'userId = ? AND lower(name) = lower(?)',
+        whereArgs: [userId, name],
+      );
+      if (existing.isNotEmpty) return WorkerSaveResult.alreadyExists;
+
+      if (subscriptionLocked) {
+        final countResult = await txn.rawQuery(
+          'SELECT COUNT(*) AS count FROM workers WHERE userId = ?',
+          [userId],
+        );
+        final workerCount = (countResult.first['count'] as num?)?.toInt() ?? 0;
+        if (workerCount >= 3) return WorkerSaveResult.limitReached;
+      }
+
+      await txn.insert('workers', {'userId': userId, 'name': name});
+      return WorkerSaveResult.added;
+    });
   }
 
   Future<List<Map<String, dynamic>>> getWorkers() async {
@@ -284,17 +484,25 @@ class DatabaseHelper {
 
     await dbInstance.delete(
       'customers',
-      where: '''
-      userId = ? AND
+      where:
+          '''
+      $_activityWhere AND
       id IN (
-        SELECT id FROM customers
-        WHERE id NOT IN (SELECT DISTINCT customerId FROM sales)
-        AND id NOT IN (SELECT DISTINCT customerId FROM payments)
-        AND id NOT IN (SELECT DISTINCT customerId FROM receipts)
+        SELECT id FROM customers WHERE userId = ?
+        AND id NOT IN (SELECT DISTINCT customerId FROM sales WHERE userId = ?)
+        AND id NOT IN (SELECT DISTINCT customerId FROM payments WHERE userId = ?)
+        AND id NOT IN (SELECT DISTINCT customerId FROM receipts WHERE userId = ?)
       )
       AND date(createdAt) < date(?)
     ''',
-      whereArgs: [_userId, cutoffDate],
+      whereArgs: [
+        ..._activityArgs,
+        _userId,
+        _userId,
+        _userId,
+        _userId,
+        cutoffDate,
+      ],
     );
   }
 
@@ -420,15 +628,61 @@ class DatabaseHelper {
       whereArgs: _userId == 0 ? null : [_userId],
     );
     if (result.isEmpty) return false;
-    final storedHash = result.first['pinHash'] as String;
-    return hashPin(pin) == storedHash;
+    final user = result.first;
+    final userId = (user['id'] as num).toInt();
+    final states = await db.query(
+      'local_pin_security_state',
+      where: 'userId = ?',
+      whereArgs: [userId],
+      limit: 1,
+    );
+    final state = states.isEmpty ? null : states.first;
+    final lockoutUntil = DateTime.tryParse(
+      state?['lockoutUntil']?.toString() ?? '',
+    );
+    final now = DateTime.now();
+    if (lockoutUntil != null && now.isBefore(lockoutUntil)) return false;
+
+    final storedHash = user['pinHash'] as String;
+    final isValid = await _matchesPin(pin, storedHash);
+    if (isValid && !storedHash.startsWith('argon2id-v1\$')) {
+      final upgradedHash = await hashPin(pin);
+      await db.update(
+        'users',
+        {'pinHash': upgradedHash},
+        where: 'id = ?',
+        whereArgs: [userId],
+      );
+    }
+    if (isValid) {
+      await db.delete(
+        'local_pin_security_state',
+        where: 'userId = ?',
+        whereArgs: [userId],
+      );
+      return true;
+    }
+
+    final previousAttempts = lockoutUntil != null && !now.isBefore(lockoutUntil)
+        ? 0
+        : (state?['failedAttempts'] as num?)?.toInt() ?? 0;
+    final failedAttempts = previousAttempts + 1;
+    await db.insert('local_pin_security_state', {
+      'userId': userId,
+      'failedAttempts': failedAttempts,
+      'lockoutUntil': failedAttempts >= 5
+          ? now.add(const Duration(minutes: 15)).toIso8601String()
+          : null,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+    return isValid;
   }
 
   Future<void> updatePin(String newPin) async {
     final db = await database;
+    final pinHash = await hashPin(newPin);
     await db.update(
       'users',
-      {'pinHash': hashPin(newPin)},
+      {'pinHash': pinHash},
       where: 'id = ?',
       whereArgs: [_userId],
     );
@@ -455,8 +709,31 @@ class DatabaseHelper {
     final db = await database;
     return await db.query(
       'customers',
-      where: _scopeWhere,
-      whereArgs: _scopeArgs,
+      where: _activityWhere,
+      whereArgs: _activityArgs,
+    );
+  }
+
+  Future<Map<String, dynamic>?> getCustomerById(int customerId) async {
+    final db = await database;
+    final result = await db.query(
+      'customers',
+      where: 'id = ? AND $_activityWhere',
+      whereArgs: [customerId, ..._activityArgs],
+      limit: 1,
+    );
+    return result.isEmpty ? null : result.first;
+  }
+
+  Future<List<Map<String, dynamic>>> getReceiptsByCustomer(
+    int customerId,
+  ) async {
+    final db = await database;
+    return db.query(
+      'receipts',
+      where: 'customerId = ? AND $_activityWhere',
+      whereArgs: [customerId, ..._activityArgs],
+      orderBy: 'date DESC',
     );
   }
 
@@ -464,8 +741,8 @@ class DatabaseHelper {
     final db = await database;
     return await db.query(
       'expenses',
-      where: _scopeWhere,
-      whereArgs: _scopeArgs,
+      where: _activityWhere,
+      whereArgs: _activityArgs,
       orderBy: 'date DESC',
     );
   }
@@ -474,8 +751,8 @@ class DatabaseHelper {
     final db = await database;
     return await db.delete(
       'expenses',
-      where: 'id = ? AND userId = ?',
-      whereArgs: [id, _userId],
+      where: 'id = ? AND $_activityWhere',
+      whereArgs: [id, ..._activityArgs],
     );
   }
 
@@ -488,6 +765,94 @@ class DatabaseHelper {
       limit: 1,
     );
     return result.isEmpty ? null : result.first;
+  }
+
+  Future<Map<String, List<Map<String, dynamic>>>>
+  exportCompanySnapshot() async {
+    final db = await database;
+    const tables = [
+      'users',
+      'workers',
+      'customers',
+      'products',
+      'sales',
+      'payments',
+      'expenses',
+      'debts',
+      'receipts',
+    ];
+    final snapshot = <String, List<Map<String, dynamic>>>{};
+    for (final table in tables) {
+      snapshot[table] = await db.query(
+        table,
+        where: table == 'users' ? 'id = ?' : _scopeWhere,
+        whereArgs: _scopeArgs,
+      );
+    }
+    return snapshot;
+  }
+
+  Future<int> importCompanySnapshot(
+    Map<String, List<Map<String, dynamic>>> snapshot, {
+    String? pin,
+    int cloudRevision = 0,
+  }) async {
+    final userRows = snapshot['users'];
+    if (userRows == null || userRows.length != 1) {
+      throw const FormatException('Company snapshot must include one user.');
+    }
+
+    final user = Map<String, dynamic>.from(userRows.single);
+    final userId = (user['id'] as num?)?.toInt();
+    if (userId == null) {
+      throw const FormatException('Company snapshot user has no ID.');
+    }
+
+    final importedPinHash = pin == null ? null : await hashPin(pin);
+    final db = await database;
+    await db.transaction((txn) async {
+      final localUsers = await txn.query(
+        'users',
+        where: 'id = ?',
+        whereArgs: [userId],
+        limit: 1,
+      );
+      final localUser = localUsers.isEmpty
+          ? <String, dynamic>{}
+          : localUsers.first;
+      user['pinHash'] = importedPinHash ?? localUser['pinHash'];
+      user['subscriptionPaid'] = localUser['subscriptionPaid'] ?? 0;
+      user['subscriptionExpiresAt'] = localUser['subscriptionExpiresAt'];
+
+      if (localUsers.isEmpty) {
+        await txn.insert('users', user);
+      } else {
+        await txn.update('users', user, where: 'id = ?', whereArgs: [userId]);
+      }
+
+      const tables = [
+        'workers',
+        'customers',
+        'products',
+        'sales',
+        'payments',
+        'expenses',
+        'debts',
+        'receipts',
+      ];
+      for (final table in tables) {
+        await txn.delete(table, where: _scopeWhere, whereArgs: [userId]);
+        for (final row in snapshot[table] ?? const []) {
+          if ((row['userId'] as num?)?.toInt() != userId) continue;
+          await txn.insert(table, row);
+        }
+      }
+      await txn.update('cloud_sync_state', {
+        'dirty': 0,
+        'cloud_revision': cloudRevision,
+      }, where: 'id = 1');
+    });
+    return userId;
   }
 
   // ---------- Users ----------
@@ -515,7 +880,7 @@ class DatabaseHelper {
   // ---------- Products ----------
   Future<void> insertProduct(Map<String, dynamic> product) async {
     final db = await database;
-    await db.insert('products', _scoped(product));
+    await db.insert('products', _scoped(product, trackWorker: false));
   }
 
   Future<void> deleteProduct(int id) async {
@@ -583,8 +948,8 @@ class DatabaseHelper {
     final db = await database;
     return await db.query(
       'sales',
-      where: _scopeWhere,
-      whereArgs: _scopeArgs,
+      where: _activityWhere,
+      whereArgs: _activityArgs,
       orderBy: 'date DESC',
     );
   }
@@ -601,9 +966,9 @@ class DatabaseHelper {
     final existing = await db.query(
       'sales',
       where:
-          'userId = ? AND customerId = ? AND product = ? AND quantity = ? AND amount = ? AND date = ?',
+          '$_activityWhere AND customerId = ? AND product = ? AND quantity = ? AND amount = ? AND date = ?',
       whereArgs: [
-        _userId,
+        ..._activityArgs,
         sale['customerId'],
         sale['product'],
         sale['quantity'],
@@ -620,8 +985,8 @@ class DatabaseHelper {
     final db = await database;
     return await db.query(
       'sales',
-      where: 'customerId = ? AND userId = ?',
-      whereArgs: [customerId, _userId],
+      where: 'customerId = ? AND $_activityWhere',
+      whereArgs: [customerId, ..._activityArgs],
       orderBy: 'date DESC',
     );
   }
@@ -631,8 +996,8 @@ class DatabaseHelper {
     if (AppSession.isWorker) {
       final start = workerDashboardStart().toIso8601String();
       final result = await db.rawQuery(
-        'SELECT SUM(amount) as total FROM sales WHERE userId = ? AND date >= ?',
-        [_userId, start],
+        'SELECT SUM(amount) as total FROM sales WHERE $_activityWhere AND date >= ?',
+        [..._activityArgs, start],
       );
       return (result.first['total'] as num?)?.toDouble() ?? 0.0;
     }
@@ -643,46 +1008,144 @@ class DatabaseHelper {
     return (result.first['total'] as num?)?.toDouble() ?? 0.0;
   }
 
-  Future<int> adminDeleteSale(int id) async {
+  Future<int> adminDeleteSale(int id, {required int companyId}) async {
     final db = await database;
-    final sale = await db.query(
-      'sales',
-      where: 'id = ?',
-      whereArgs: [id],
-      limit: 1,
-    );
-    if (sale.isEmpty) return 0;
+    return db.transaction((txn) async {
+      final sales = await txn.query(
+        'sales',
+        where: 'id = ? AND userId = ?',
+        whereArgs: [id, companyId],
+        limit: 1,
+      );
+      if (sales.isEmpty) return 0;
 
-    final deleted = await db.delete('sales', where: 'id = ?', whereArgs: [id]);
-    if (deleted > 0) {
-      final productName = sale.first['product']?.toString();
-      final qty = (sale.first['quantity'] as num?)?.toInt() ?? 0;
-      if (productName != null && qty > 0) {
-        final currentStock = await getProductStock(productName);
-        final restored = (currentStock ?? 0) + qty;
-        await db.update(
+      final sale = sales.first;
+      final deleted = await txn.delete(
+        'sales',
+        where: 'id = ? AND userId = ?',
+        whereArgs: [id, companyId],
+      );
+      if (deleted == 0) return 0;
+
+      final productName = sale['product']?.toString();
+      final quantity = (sale['quantity'] as num?)?.toInt() ?? 0;
+      if (productName != null && quantity > 0) {
+        final products = await txn.query(
           'products',
-          {'stock': restored},
+          columns: ['stock'],
           where: 'name = ? AND userId = ?',
-          whereArgs: [productName, _userId],
+          whereArgs: [productName, companyId],
+          limit: 1,
+        );
+        if (products.isNotEmpty) {
+          final stock = (products.first['stock'] as num?)?.toInt() ?? 0;
+          await txn.update(
+            'products',
+            {'stock': stock + quantity},
+            where: 'name = ? AND userId = ?',
+            whereArgs: [productName, companyId],
+          );
+        }
+      }
+
+      final customerId = (sale['customerId'] as num?)?.toInt();
+      final date = sale['date']?.toString();
+      if (customerId == null || date == null) return deleted;
+
+      const orderWhere = 'userId = ? AND customerId = ? AND date = ?';
+      final orderArgs = [companyId, customerId, date];
+      final remainingSales = await txn.query(
+        'sales',
+        columns: ['amount'],
+        where: orderWhere,
+        whereArgs: orderArgs,
+      );
+      if (remainingSales.isEmpty) {
+        await txn.delete('payments', where: orderWhere, whereArgs: orderArgs);
+        await txn.delete('receipts', where: orderWhere, whereArgs: orderArgs);
+        return deleted;
+      }
+
+      final orderTotal = remainingSales.fold<double>(
+        0,
+        (total, row) => total + ((row['amount'] as num?)?.toDouble() ?? 0),
+      );
+      final payments = await txn.query(
+        'payments',
+        where: orderWhere,
+        whereArgs: orderArgs,
+      );
+      for (final payment in payments) {
+        final method = payment['method']?.toString();
+        final surcharge = method == 'mobile_money' || method == 'bank_card'
+            ? orderTotal * 0.01
+            : 0.0;
+        await txn.update(
+          'payments',
+          {
+            'initialTotal': orderTotal,
+            'surcharge': surcharge,
+            'finalTotal': orderTotal + surcharge,
+          },
+          where: 'id = ? AND userId = ?',
+          whereArgs: [payment['id'], companyId],
         );
       }
-      await db.delete(
-        'payments',
-        where: 'customerId = ? AND saleId = ?',
-        whereArgs: [sale.first['customerId'], id],
+
+      final receipts = await txn.query(
+        'receipts',
+        where: orderWhere,
+        whereArgs: orderArgs,
       );
-      final customerCount = await db.rawQuery(
-        'SELECT COUNT(*) as count FROM customers WHERE userId = ?',
-        [_userId],
-      );
-      final totalCustomers =
-          (customerCount.first['count'] as num?)?.toInt() ?? 0;
-      if (totalCustomers == 0) {
-        await db.delete('customers', where: 'userId = ?', whereArgs: [_userId]);
+      for (final receipt in receipts) {
+        final rawDetails = receipt['details'];
+        if (rawDetails is! String) continue;
+        try {
+          final decoded = jsonDecode(rawDetails);
+          if (decoded is! Map) continue;
+          final details = Map<String, dynamic>.from(decoded);
+          final products = (details['products'] as List? ?? [])
+              .map((item) => Map<String, dynamic>.from(item as Map))
+              .toList();
+          final saleAmount = (sale['amount'] as num?)?.toDouble();
+          final productIndex = products.indexWhere((item) {
+            final lineAmount =
+                (item['subtotal'] as num?)?.toDouble() ??
+                (item['amount'] as num?)?.toDouble();
+            return item['product']?.toString() == productName &&
+                (item['quantity'] as num?)?.toInt() == quantity &&
+                (saleAmount == null || lineAmount == saleAmount);
+          });
+          if (productIndex == -1) continue;
+
+          products.removeAt(productIndex);
+          details['products'] = products;
+          details['initialTotal'] = orderTotal;
+          final method = details['paymentMethod']?.toString();
+          final surcharge = method == 'mobile_money' || method == 'bank_card'
+              ? orderTotal * 0.01
+              : 0.0;
+          details['surcharge'] = surcharge;
+          details['finalTotal'] = orderTotal + surcharge;
+          final cashReceived = (details['cashReceived'] as num?)?.toDouble();
+          if (cashReceived != null) {
+            details['changeDue'] = cashReceived - (orderTotal + surcharge);
+          }
+          await txn.update(
+            'receipts',
+            {'details': jsonEncode(details)},
+            where: 'id = ? AND userId = ?',
+            whereArgs: [receipt['id'], companyId],
+          );
+        } on FormatException {
+          continue;
+        } on TypeError {
+          continue;
+        }
       }
-    }
-    return deleted;
+
+      return deleted;
+    });
   }
 
   // ---------- Payments ----------
@@ -695,8 +1158,8 @@ class DatabaseHelper {
     final db = await database;
     return await db.query(
       'payments',
-      where: _scopeWhere,
-      whereArgs: _scopeArgs,
+      where: _activityWhere,
+      whereArgs: _activityArgs,
       orderBy: 'date DESC',
     );
   }
@@ -726,8 +1189,13 @@ class DatabaseHelper {
     final db = await database;
     final existing = await db.query(
       'expenses',
-      where: 'userId = ? AND name = ? AND amount = ? AND date = ?',
-      whereArgs: [_userId, expense['name'], expense['amount'], expense['date']],
+      where: '$_activityWhere AND name = ? AND amount = ? AND date = ?',
+      whereArgs: [
+        ..._activityArgs,
+        expense['name'],
+        expense['amount'],
+        expense['date'],
+      ],
     );
     if (existing.isEmpty) {
       await db.insert('expenses', _scoped(expense));
@@ -739,8 +1207,8 @@ class DatabaseHelper {
     if (AppSession.isWorker) {
       final start = workerDashboardStart().toIso8601String();
       final result = await db.rawQuery(
-        'SELECT SUM(amount) as total FROM expenses WHERE userId = ? AND date >= ?',
-        [_userId, start],
+        'SELECT SUM(amount) as total FROM expenses WHERE $_activityWhere AND date >= ?',
+        [..._activityArgs, start],
       );
       return (result.first['total'] as num?)?.toDouble() ?? 0.0;
     }
@@ -761,8 +1229,8 @@ class DatabaseHelper {
     final db = await database;
     return await db.query(
       'debts',
-      where: _scopeWhere,
-      whereArgs: _scopeArgs,
+      where: _activityWhere,
+      whereArgs: _activityArgs,
       orderBy: 'date DESC',
     );
   }
@@ -777,8 +1245,13 @@ class DatabaseHelper {
     final db = await database;
     final existing = await db.query(
       'debts',
-      where: 'userId = ? AND creditor = ? AND amount = ? AND date = ?',
-      whereArgs: [_userId, debt['creditor'], debt['amount'], debt['date']],
+      where: '$_activityWhere AND creditor = ? AND amount = ? AND date = ?',
+      whereArgs: [
+        ..._activityArgs,
+        debt['creditor'],
+        debt['amount'],
+        debt['date'],
+      ],
     );
     if (existing.isEmpty) {
       await db.insert('debts', _scoped(debt));
@@ -790,8 +1263,8 @@ class DatabaseHelper {
     if (AppSession.isWorker) {
       final start = workerDashboardStart().toIso8601String();
       final result = await db.rawQuery(
-        'SELECT SUM(amount) as total FROM debts WHERE userId = ? AND date >= ?',
-        [_userId, start],
+        'SELECT SUM(amount) as total FROM debts WHERE $_activityWhere AND date >= ?',
+        [..._activityArgs, start],
       );
       return (result.first['total'] as num?)?.toDouble() ?? 0.0;
     }
@@ -812,18 +1285,21 @@ class DatabaseHelper {
   // ---------- Transaction History ----------
   Future<List<Map<String, dynamic>>> getTransactionHistory() async {
     final db = await database;
-    return await db.rawQuery(
-      '''
-      SELECT 'Sale' as type, amount, date FROM sales WHERE userId = ?
+    final activityArgs = [
+      ..._activityArgs,
+      ..._activityArgs,
+      ..._activityArgs,
+      ..._activityArgs,
+    ];
+    return await db.rawQuery('''
+      SELECT 'Sale' as type, amount, date FROM sales WHERE $_activityWhere
       UNION
-      SELECT 'Payment' as type, finalTotal as amount, date FROM payments WHERE userId = ?
+      SELECT 'Payment' as type, finalTotal as amount, date FROM payments WHERE $_activityWhere
       UNION
-      SELECT 'Expense' as type, amount, date FROM expenses WHERE userId = ?
+      SELECT 'Expense' as type, amount, date FROM expenses WHERE $_activityWhere
       UNION
-      SELECT 'Debt' as type, amount, date FROM debts WHERE userId = ?
+      SELECT 'Debt' as type, amount, date FROM debts WHERE $_activityWhere
       ORDER BY date DESC
-    ''',
-      [_userId, _userId, _userId, _userId],
-    );
+    ''', activityArgs);
   }
 }

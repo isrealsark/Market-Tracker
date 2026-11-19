@@ -1,17 +1,20 @@
-# market_tracker
+# Market Tracker
 
-A new Flutter project.
+Market Tracker is a Windows-only Flutter desktop application.
 
-## Getting Started
+## Run on Windows
 
-This project is a starting point for a Flutter application.
+Install Flutter and Visual Studio with the **Desktop development with C++** workload, then run these commands from this directory:
 
-A few resources to get you started if this is your first Flutter project:
+```powershell
+flutter pub get
+flutter run -d windows
+```
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+To create a release build:
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```powershell
+flutter build windows --release
+```
+
+The app intentionally stops at startup on non-Windows platforms. Its local database uses SQLite FFI for Windows.
